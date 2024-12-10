@@ -1,10 +1,20 @@
 import { request, gql } from "graphql-request";
 import { shortString } from "starknet";
-import { Bot } from "grammy";
+import { Bot, InlineKeyboard } from "grammy";
+import { createClient } from "@supabase/supabase-js";
 import dotenv from "dotenv";
+import { conversations, createConversation } from "@grammyjs/conversations";
+import { session } from "grammy";
+import { freeStorage } from "@grammyjs/storage-free";
 
 // Charger les variables d'environnement
 dotenv.config();
+
+// Supabase setup
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_KEY
+);
 
 const TEST_API = process.env.TEST_API;
 const PROD_API = process.env.PROD_API;
@@ -69,22 +79,117 @@ const OWNER_QUERY = gql`
 class BattleMonitor {
   constructor(bot) {
     this.bot = bot;
-    this.chatId = 1723768787; // Chat ID de test
     this.knownBattles = new Set();
     this.initBot();
   }
 
   // Initialisation du bot avec les commandes
   async initBot() {
-    // Commande /start
+    // Add session middleware before conversations
+    this.bot.use(
+      session({
+        initial: () => ({ awaitingUsername: false }),
+        storage: freeStorage(process.env.TELEGRAM_BOT_TOKEN),
+      })
+    );
+
+    // Add conversations middleware
+    this.bot.use(conversations());
+
+    // Bind the conversation handler to the class instance
+    this.bot.use(createConversation(this.getUsernameConversation.bind(this)));
+
+    // Commande start avec demande de username
     this.bot.command("start", async (ctx) => {
+      const keyboard = new InlineKeyboard().text(
+        "Register my username",
+        "register_username"
+      );
+
       await ctx.reply(
-        "👋 Battle Monitor started! You will receive notifications about new battles."
+        "👋 Welcome to the Battle Monitor!\n\n" +
+          "To receive battle notifications, please register your username.",
+        { reply_markup: keyboard }
       );
     });
 
-    // Démarrer le bot
+    // Gestionnaire pour le bouton "Register username"
+    this.bot.callbackQuery("register_username", async (ctx) => {
+      try {
+        await ctx.conversation.enter("bound getUsernameConversation");
+        await ctx.answerCallbackQuery();
+      } catch (error) {
+        console.error("Error starting username conversation:", error);
+        await ctx.answerCallbackQuery("An error occurred. Please try again.");
+      }
+    });
+
+    // Commande pour se désinscrire
+    this.bot.command("unsubscribe", async (ctx) => {
+      await this.removeUser(ctx.chat.id);
+      await ctx.reply("You have been unsubscribed from battle notifications.");
+    });
+
+    // Handler pour obtenir le username
+    this.bot.on("message:text", async (ctx) => {
+      const username = ctx.message.text;
+      const chatId = ctx.chat.id;
+
+      if (ctx.session?.awaitingUsername) {
+        await this.registerUser(chatId, username);
+        ctx.session.awaitingUsername = false;
+        await ctx.reply(
+          "Thank you! You are now registered for battle notifications."
+        );
+      }
+    });
+
     this.bot.start();
+  }
+
+  async registerUser(chatId, username) {
+    try {
+      const { data, error } = await supabase.from("users").upsert([
+        {
+          chat_id: chatId,
+          username: username,
+          created_at: new Date(),
+        },
+      ]);
+
+      if (error) throw error;
+      console.log(`User registered: ${username} (${chatId})`);
+    } catch (error) {
+      console.error("Error registering user:", error);
+    }
+  }
+
+  async removeUser(chatId) {
+    try {
+      const { error } = await supabase
+        .from("users")
+        .delete()
+        .eq("chat_id", chatId);
+
+      if (error) throw error;
+      console.log(`User unsubscribed: ${chatId}`);
+    } catch (error) {
+      console.error("Error removing user:", error);
+    }
+  }
+
+  async getRegisteredUsers() {
+    try {
+      const { data, error } = await supabase
+        .from("users")
+        .select("chat_id, username");
+
+      if (error) throw error;
+      return data;
+    } catch (error) {
+      console.error("Error fetching users:", error);
+      return [];
+    }
   }
 
   decodeName(name) {
@@ -130,15 +235,27 @@ class BattleMonitor {
 
   async sendTelegramMessage(message) {
     try {
-      console.log(`Sending message to chat ID: ${this.chatId}`);
-      // Utilisation de la syntaxe correcte de grammY
-      await this.bot.api.sendMessage(this.chatId, message, {
-        parse_mode: "HTML",
-        disable_web_page_preview: true,
-      });
-      console.log("Message sent successfully");
+      const users = await this.getRegisteredUsers();
+
+      for (const user of users) {
+        try {
+          await this.bot.api.sendMessage(user.chat_id, message, {
+            parse_mode: "HTML",
+            disable_web_page_preview: true,
+          });
+          console.log(`Message sent to ${user.username} (${user.chat_id})`);
+        } catch (error) {
+          console.error(`Error sending message to ${user.chat_id}:`, error);
+          if (
+            error.description.includes("blocked") ||
+            error.description.includes("not found")
+          ) {
+            await this.removeUser(user.chat_id);
+          }
+        }
+      }
     } catch (error) {
-      console.error("Error sending Telegram message:", error);
+      console.error("Error in sendTelegramMessage:", error);
     }
   }
 
@@ -268,8 +385,38 @@ class BattleMonitor {
     this.checkForNewBattles();
     setInterval(() => this.checkForNewBattles(), interval);
   }
+
+  // Add the conversation handler
+  async getUsernameConversation(conversation, ctx) {
+    await ctx.reply("Please enter your Cartridge Controller username:");
+    const { message } = await conversation.wait();
+
+    if (!message || !message.text) {
+      await ctx.reply("Invalid input. Please try again with /start");
+      return;
+    }
+
+    const username = message.text;
+    const chatId = ctx.chat.id;
+    console.log("message", message.text);
+    console.log("chatId", chatId);
+    try {
+      await this.registerUser(chatId, username);
+      await ctx.reply(
+        "✅ Successfully registered! You will now receive battle notifications."
+      );
+    } catch (error) {
+      console.error("Error in registration:", error);
+      await ctx.reply("❌ Registration failed. Please try again with /start");
+    }
+  }
 }
 
 // Démarrage du moniteur
 const monitor = new BattleMonitor(bot);
 monitor.startMonitoring();
+
+// Add a general error handler for the bot
+bot.catch((err) => {
+  console.error("Error in bot:", err);
+});

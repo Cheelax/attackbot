@@ -10,6 +10,9 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@grammyjs/conversations": "^1.2.0",
+    "@grammyjs/storage-free": "^2.4.2",
+    "@supabase/supabase-js": "^2.47.3",
     "dotenv": "^16.4.7",
     "grammy": "^1.33.0",
     "graphql": "^16.9.0",
