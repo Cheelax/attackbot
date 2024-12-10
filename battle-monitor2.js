@@ -1,11 +1,17 @@
 import { request, gql } from "graphql-request";
 import { shortString } from "starknet";
+import { Bot } from "grammy";
+import dotenv from "dotenv";
 
-const TEST_API = "https://api.cartridge.gg/x/sepolia-rc-16/torii/graphql";
-const PROD_API = "https://api.cartridge.gg/x/realms-world-5/torii/graphql";
+// Charger les variables d'environnement
+dotenv.config();
 
-// Using TEST_API for development
+const TEST_API = process.env.TEST_API;
+const PROD_API = process.env.PROD_API;
 const ENDPOINT = TEST_API;
+
+// Création du bot
+const bot = new Bot(process.env.TELEGRAM_BOT_TOKEN);
 
 const BATTLE_QUERY = gql`
   query S0EternumBattleStartDataModels {
@@ -27,19 +33,6 @@ const BATTLE_QUERY = gql`
           y
           structure_type
           timestamp
-        }
-      }
-    }
-  }
-`;
-
-const REALM_QUERYOLD = gql`
-  query S0EternumSettleRealmDataModels($x: Int!, $y: Int!) {
-    s0EternumSettleRealmDataModels(where: { x: { _eq: $x }, y: { _eq: $y } }) {
-      edges {
-        node {
-          realm_name
-          owner_name
         }
       }
     }
@@ -74,8 +67,24 @@ const OWNER_QUERY = gql`
 `;
 
 class BattleMonitor {
-  constructor() {
+  constructor(bot) {
+    this.bot = bot;
+    this.chatId = 1723768787; // Chat ID de test
     this.knownBattles = new Set();
+    this.initBot();
+  }
+
+  // Initialisation du bot avec les commandes
+  async initBot() {
+    // Commande /start
+    this.bot.command("start", async (ctx) => {
+      await ctx.reply(
+        "👋 Battle Monitor started! You will receive notifications about new battles."
+      );
+    });
+
+    // Démarrer le bot
+    this.bot.start();
   }
 
   decodeName(name) {
@@ -119,17 +128,61 @@ class BattleMonitor {
     return `${minutes}m ${remainingSeconds}s`;
   }
 
+  async sendTelegramMessage(message) {
+    try {
+      console.log(`Sending message to chat ID: ${this.chatId}`);
+      // Utilisation de la syntaxe correcte de grammY
+      await this.bot.api.sendMessage(this.chatId, message, {
+        parse_mode: "HTML",
+        disable_web_page_preview: true,
+      });
+      console.log("Message sent successfully");
+    } catch (error) {
+      console.error("Error sending Telegram message:", error);
+    }
+  }
+
+  formatTelegramMessage(battle, realmInfo) {
+    const attackerName = this.decodeName(battle.attacker_name);
+    const defenderName = this.decodeName(battle.defender_name);
+    const duration = this.formatDuration(battle.duration_left);
+    const time = this.formatTimestamp(battle.timestamp);
+
+    let message = "";
+
+    if (battle.structure_type === "Realm" && realmInfo) {
+      message =
+        `⚔️ <b>New Battle Alert!</b>\n\n` +
+        `🗡 Attacker: <b>${attackerName}</b>\n` +
+        `🏰 Target: <b>${realmInfo.name}</b> Realm\n` +
+        `👑 Realm Owner: <b>${realmInfo.ownerName}</b>\n` +
+        `📍 Location: (${battle.x}, ${battle.y})\n` +
+        `⏱ Duration: ${duration}\n` +
+        `🕒 Started at: ${time}`;
+    } else {
+      message =
+        `⚔️ <b>New Battle Alert!</b>\n\n` +
+        `🗡 Attacker: <b>${attackerName}</b>\n` +
+        `🛡 Defender: <b>${defenderName}</b>\n` +
+        `🎯 Target: ${battle.structure_type}\n` +
+        `⏱ Duration: ${duration}\n` +
+        `🕒 Started at: ${time}`;
+    }
+
+    return message;
+  }
+
   async checkForNewBattles() {
     try {
       const data = await request(ENDPOINT, BATTLE_QUERY);
       const battles = data.s0EternumBattleStartDataModels.edges;
 
-      battles.forEach(({ node: battle }) => {
+      for (const { node: battle } of battles) {
         if (!this.knownBattles.has(battle.battle_entity_id)) {
           this.knownBattles.add(battle.battle_entity_id);
-          this.handleNewBattle(battle);
+          await this.handleNewBattle(battle);
         }
-      });
+      }
     } catch (error) {
       console.error("Error fetching battles:", error);
     }
@@ -202,40 +255,12 @@ class BattleMonitor {
       realmInfo = await this.getRealmInfo(battle.x, battle.y);
     }
 
-    // Log le message formaté
     console.log(this.formatBattleMessage(battle, realmInfo));
 
-    // Log détaillé existant pour les données complètes
-    console.log("Battle details:", {
-      battleId: battle.battle_entity_id,
-      attacker: {
-        name: this.decodeName(battle.attacker_name),
-        address: battle.attacker,
-        armyId: battle.attacker_army_entity_id,
-      },
-      defender: {
-        name: this.decodeName(battle.defender_name),
-        address: battle.defender,
-        armyId: battle.defender_army_entity_id,
-      },
-      location: {
-        x: battle.x,
-        y: battle.y,
-        realmInfo: realmInfo
-          ? {
-              name: realmInfo.name,
-              ownerName: realmInfo.ownerName,
-            }
-          : null,
-      },
-      structureType: battle.structure_type,
-      durationLeft: this.formatDuration(battle.duration_left),
-      timestamp: this.formatTimestamp(battle.timestamp),
-      rawData: {
-        durationLeft: battle.duration_left,
-        timestamp: battle.timestamp,
-      },
-    });
+    const telegramMessage = this.formatTelegramMessage(battle, realmInfo);
+    await this.sendTelegramMessage(telegramMessage);
+
+    // Logging détaillé...
   }
 
   startMonitoring(interval = 10000) {
@@ -245,6 +270,6 @@ class BattleMonitor {
   }
 }
 
-// Start the monitor
-const monitor = new BattleMonitor();
+// Démarrage du moniteur
+const monitor = new BattleMonitor(bot);
 monitor.startMonitoring();
