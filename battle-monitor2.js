@@ -233,17 +233,38 @@ class BattleMonitor {
     return `${minutes}m ${remainingSeconds}s`;
   }
 
-  async sendTelegramMessage(message) {
+  async getUsersByDefenderName(defenderName) {
     try {
-      const users = await this.getRegisteredUsers();
+      const { data, error } = await supabase
+        .from("users")
+        .select("chat_id, username")
+        .eq("username", defenderName);
 
-      for (const user of users) {
+      if (error) throw error;
+      return data || [];
+    } catch (error) {
+      console.error("Error fetching users by defender name:", error);
+      return [];
+    }
+  }
+
+  async sendTelegramMessage(message, defenderName) {
+    try {
+      // Récupérer uniquement les utilisateurs concernés par cette attaque
+      const targetUsers = await this.getUsersByDefenderName(defenderName);
+
+      if (targetUsers.length === 0) {
+        console.log(`No registered users found for defender: ${defenderName}`);
+        return;
+      }
+
+      for (const user of targetUsers) {
         try {
           await this.bot.api.sendMessage(user.chat_id, message, {
             parse_mode: "HTML",
             disable_web_page_preview: true,
           });
-          console.log(`Message sent to ${user.username} (${user.chat_id})`);
+          console.log(`Alert sent to ${user.username} (${user.chat_id})`);
         } catch (error) {
           console.error(`Error sending message to ${user.chat_id}:`, error);
           if (
@@ -372,12 +393,18 @@ class BattleMonitor {
       realmInfo = await this.getRealmInfo(battle.x, battle.y);
     }
 
+    // Log pour le monitoring général
     console.log(this.formatBattleMessage(battle, realmInfo));
 
-    const telegramMessage = this.formatTelegramMessage(battle, realmInfo);
-    await this.sendTelegramMessage(telegramMessage);
+    // Récupérer le nom du défenseur selon le type de structure
+    const defenderName =
+      battle.structure_type === "Realm" && realmInfo
+        ? this.decodeName(realmInfo.owner_name)
+        : this.decodeName(battle.defender_name);
 
-    // Logging détaillé...
+    // Formatter et envoyer le message uniquement aux défenseurs concernés
+    const telegramMessage = this.formatTelegramMessage(battle, realmInfo);
+    await this.sendTelegramMessage(telegramMessage, defenderName);
   }
 
   startMonitoring(interval = 10000) {
