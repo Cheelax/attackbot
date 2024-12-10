@@ -233,12 +233,22 @@ class BattleMonitor {
     return `${minutes}m ${remainingSeconds}s`;
   }
 
-  async getUsersByDefenderName(defenderName) {
+  async getUsersByDefenderName(defenderName, realmOwnerName = null) {
     try {
-      const { data, error } = await supabase
-        .from("users")
-        .select("chat_id, username")
-        .eq("username", defenderName);
+      // Construire la requête pour chercher les deux noms
+      let query = supabase.from("users").select("chat_id, username");
+
+      if (realmOwnerName) {
+        // Si on a un realm owner, on cherche les deux noms
+        query = query.or(
+          `username.eq.${defenderName},username.eq.${realmOwnerName}`
+        );
+      } else {
+        // Sinon on cherche juste le defender
+        query = query.eq("username", defenderName);
+      }
+
+      const { data, error } = await query;
 
       if (error) throw error;
       return data || [];
@@ -248,17 +258,31 @@ class BattleMonitor {
     }
   }
 
-  async sendTelegramMessage(message, defenderName) {
+  async sendTelegramMessage(message, defenderName, realmInfo = null) {
     try {
-      // Récupérer uniquement les utilisateurs concernés par cette attaque
-      const targetUsers = await this.getUsersByDefenderName(defenderName);
+      // Récupérer les utilisateurs concernés par cette attaque (defender et/ou realm owner)
+      const targetUsers = await this.getUsersByDefenderName(
+        defenderName,
+        realmInfo?.ownerName
+      );
 
       if (targetUsers.length === 0) {
-        console.log(`No registered users found for defender: ${defenderName}`);
+        console.log(
+          `No registered users found for defender: ${defenderName}${
+            realmInfo?.ownerName
+              ? ` or realm owner: ${realmInfo.ownerName}`
+              : ""
+          }`
+        );
         return;
       }
 
-      for (const user of targetUsers) {
+      // Dédupliquer les utilisateurs au cas où quelqu'un serait à la fois defender et realm owner
+      const uniqueUsers = Array.from(
+        new Map(targetUsers.map((user) => [user.chat_id, user])).values()
+      );
+
+      for (const user of uniqueUsers) {
         try {
           await this.bot.api.sendMessage(user.chat_id, message, {
             parse_mode: "HTML",
@@ -397,14 +421,11 @@ class BattleMonitor {
     console.log(this.formatBattleMessage(battle, realmInfo));
 
     // Récupérer le nom du défenseur selon le type de structure
-    const defenderName =
-      battle.structure_type === "Realm" && realmInfo
-        ? this.decodeName(realmInfo.owner_name)
-        : this.decodeName(battle.defender_name);
+    const defenderName = this.decodeName(battle.defender_name);
 
-    // Formatter et envoyer le message uniquement aux défenseurs concernés
+    // Formatter et envoyer le message aux défenseurs concernés
     const telegramMessage = this.formatTelegramMessage(battle, realmInfo);
-    await this.sendTelegramMessage(telegramMessage, defenderName);
+    await this.sendTelegramMessage(telegramMessage, defenderName, realmInfo);
   }
 
   startMonitoring(interval = 10000) {
